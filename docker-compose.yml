@@ -1,0 +1,116 @@
+services:
+
+  # ------------------------------------------------------------------
+  # Banco de dados PostgreSQL (imagem oficial).
+  # Fica isolado na rede interna: NAO publica porta no host.
+  # ------------------------------------------------------------------
+  db:
+    image: postgres:16-alpine
+    environment:
+      # Credenciais lidas do .env (RNF03) - nenhuma senha escrita aqui.
+      POSTGRES_DB: ${POSTGRES_DB}
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+    volumes:
+      # Volume nomeado: diretorio de dados do PostgreSQL.
+      - dados_banco:/var/lib/postgresql/data
+      # Bind mount somente leitura: scripts em /docker-entrypoint-initdb.d/
+      # sao executados pela imagem oficial APENAS quando o diretorio de
+      # dados esta vazio (primeira execucao).
+      - ./db/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+    healthcheck:
+      # pg_isready pergunta ao Postgres se ele ja aceita conexoes.
+      # E isso que o web aguarda via condition: service_healthy (RNF05).
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+    networks:
+      - rede_interna
+    restart: unless-stopped
+
+  # ------------------------------------------------------------------
+  # Aplicacao Flask servida pelo Gunicorn (imagem propria, build ./app).
+  # NAO publica porta: so e alcancada pelo nginx, dentro da rede interna.
+  # ------------------------------------------------------------------
+  web:
+    build: ./app
+    environment:
+      # Nomes que o app.py espera. Observe que sao DIFERENTES dos nomes
+      # que o Postgres usa, mas os valores vem das mesmas variaveis do .env.
+      DB_HOST: db          # nome do servico, resolvido pelo DNS interno
+      DB_PORT: "5432"
+      DB_NAME: ${POSTGRES_DB}
+      DB_USER: ${POSTGRES_USER}
+      DB_PASSWORD: ${POSTGRES_PASSWORD}
+      UPLOAD_DIR: /app/uploads
+    # Sem "ports": a aplicacao escuta na 5000 apenas dentro da rede.
+    # Isso tambem permite escalar com --scale web=3, ja que nenhuma
+    # replica disputa uma porta do host.
+    volumes:
+      # Volume nomeado das fotos enviadas pelos usuarios.
+      - fotos:/app/uploads
+    depends_on:
+      db:
+        # Nao basta o container do banco ter iniciado: espera ficar
+        # saudavel, ou seja, pronto para aceitar conexoes (RNF05).
+        condition: service_healthy
+    networks:
+      - rede_interna
+    restart: unless-stopped
+
+  # ------------------------------------------------------------------
+  # Proxy reverso nginx (bonus). Unico servico com porta publicada:
+  # recebe tudo na 8080 do host e repassa ao web, na porta 5000.
+  # ------------------------------------------------------------------
+  nginx:
+    image: nginx:alpine
+    ports:
+      # host:container - o nginx escuta na 80 e e publicado na 8080.
+      - "8080:80"
+    volumes:
+      # Bind mount somente leitura: a configuracao vive no repositorio.
+      - ./nginx/nginx.conf:/etc/nginx/conf.d/default.conf:ro
+    depends_on:
+      - web
+    networks:
+      - rede_interna
+    restart: unless-stopped
+
+  # ------------------------------------------------------------------
+  # Painel web do banco (bonus). So existe no profile "debug": um
+  # "docker compose up -d" comum NAO o inicia. Para subir:
+  #   docker compose --profile debug up -d
+  # ------------------------------------------------------------------
+  adminer:
+    image: adminer
+    profiles: ["debug"]
+    ports:
+      # Publicado apenas em 127.0.0.1: o painel da acesso total ao banco,
+      # entao so pode ser aberto na propria maquina, nunca pela rede.
+      - "127.0.0.1:8081:8080"
+    environment:
+      # Ja preenche o campo "Servidor" da tela de login com o nome "db".
+      ADMINER_DEFAULT_SERVER: db
+    depends_on:
+      db:
+        condition: service_healthy
+    networks:
+      - rede_interna
+
+# --------------------------------------------------------------------
+# Rede bridge definida pelo usuario. Permite que o web encontre o db
+# pelo nome do servico atraves do DNS interno do Docker.
+# --------------------------------------------------------------------
+networks:
+  rede_interna:
+    driver: bridge
+
+# --------------------------------------------------------------------
+# Volumes nomeados: vivem fora do ciclo de vida dos containers, por isso
+# os dados sobrevivem a "docker compose down" (RNF02).
+# --------------------------------------------------------------------
+volumes:
+  dados_banco:
+  fotos:

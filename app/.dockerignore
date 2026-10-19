@@ -1,0 +1,15 @@
+# Segredos nunca entram no contexto de build
+.env
+.env.*
+
+# Artefatos do Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyc
+
+# Ambientes virtuais e metadados
+.venv/
+venv/
+.git/
+.gitignore
